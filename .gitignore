@@ -166,3 +166,6 @@ opencode.json
 
 # Cursor
 .cursor/
+
+# Stock copies of customized skills/commands buffered by `openspec update`
+openspec/update-buffer/
