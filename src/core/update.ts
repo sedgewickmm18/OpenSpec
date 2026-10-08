@@ -46,6 +46,7 @@ import {
 } from './legacy-cleanup.js';
 import { isInteractive } from '../utils/interactive.js';
 import { getGlobalConfig, type Delivery, type Profile } from './global-config.js';
+import { bufferStockArtifact, isCustomizedArtifact } from './update-customization.js';
 import { getProfileWorkflows, ALL_WORKFLOWS, CORE_WORKFLOWS } from './profiles.js';
 import { formatOptionalWorkflowsNote, getOnboardingCommands } from './onboarding-commands.js';
 import { getAvailableTools } from './available-tools.js';
@@ -139,9 +140,44 @@ export function scanInstalledWorkflows(projectPath: string, toolIds: string[]): 
 
 export class UpdateCommand {
   private readonly force: boolean;
+  /**
+   * Project-relative paths of customized artifacts preserved this run. The
+   * summary lists them so the user knows which files were left alone and
+   * where the stock replacements were buffered.
+   */
+  private readonly preservedCustomizations: string[] = [];
 
   constructor(options: UpdateCommandOptions = {}) {
     this.force = options.force ?? false;
+  }
+
+  /**
+   * Writes freshly generated content to a managed artifact, preserving a
+   * customized file instead of clobbering it.
+   *
+   * When the existing artifact's frontmatter metadata carries keys this
+   * generator never emits (e.g. a `backend:` marker), the file is left
+   * untouched, the stock content is buffered under `openspec/update-buffer/`
+   * for review, and the path is recorded for the run summary. Plain stock
+   * files are overwritten exactly as before.
+   */
+  private async writeArtifactWithPreservation(
+    projectPath: string,
+    targetFile: string,
+    stockContent: string
+  ): Promise<void> {
+    let existing: string | null = null;
+    try {
+      existing = fs.readFileSync(targetFile, 'utf-8');
+    } catch {
+      existing = null;
+    }
+    if (isCustomizedArtifact(existing)) {
+      this.preservedCustomizations.push(path.relative(projectPath, targetFile));
+      await bufferStockArtifact(projectPath, targetFile, stockContent);
+      return;
+    }
+    await FileSystemUtils.writeFile(targetFile, stockContent);
   }
 
   /**
@@ -349,7 +385,7 @@ export class UpdateCommand {
             );
             const skillContent = generateSkillContent(template, OPENSPEC_VERSION, transformer);
             FileSystemUtils.assertPathWithin(skillsRoot, skillFile);
-            await FileSystemUtils.writeFile(skillFile, skillContent);
+            await this.writeArtifactWithPreservation(resolvedProjectPath, skillFile, skillContent);
           }
           writeSharedSkillTarget(resolvedProjectPath, tool.value);
 
@@ -390,7 +426,7 @@ export class UpdateCommand {
                 resolvedProjectPath,
                 cmd.path
               );
-              await FileSystemUtils.writeFile(commandFile, cmd.fileContent);
+              await this.writeArtifactWithPreservation(resolvedProjectPath, commandFile, cmd.fileContent);
             }
 
             removedDeselectedCommandCount += await this.removeUnselectedCommandFiles(
@@ -441,6 +477,22 @@ export class UpdateCommand {
     }
     if (failedTools.length > 0) {
       console.log(chalk.red(`✗ Failed: ${failedTools.map(f => `${f.name} (${f.error})`).join(', ')}`));
+    }
+    if (this.preservedCustomizations.length > 0) {
+      console.log(
+        chalk.yellow(
+          `Preserved ${this.preservedCustomizations.length} customized artifact(s) — not overwritten. ` +
+            `Stock versions buffered under ${OPENSPEC_DIR_NAME}/update-buffer/ for review:`
+        )
+      );
+      for (const relPath of this.preservedCustomizations) {
+        console.log(chalk.dim(`  - ${relPath}`));
+      }
+      console.log(
+        chalk.dim(
+          'Reconcile by porting worthwhile changes into the customized file, then delete its buffer.'
+        )
+      );
     }
     if (skillsInvocableCommandSkips.length > 0) {
       console.log(chalk.dim(`Commands skipped for: ${skillsInvocableCommandSkips.join(', ')} (uses skills)`));
@@ -1353,7 +1405,7 @@ export class UpdateCommand {
             );
             const skillContent = generateSkillContent(template, OPENSPEC_VERSION, transformer);
             FileSystemUtils.assertPathWithin(skillsRoot, skillFile);
-            await FileSystemUtils.writeFile(skillFile, skillContent);
+            await this.writeArtifactWithPreservation(projectPath, skillFile, skillContent);
           }
           writeSharedSkillTarget(projectPath, tool.value);
         }
@@ -1369,7 +1421,7 @@ export class UpdateCommand {
                 projectPath,
                 cmd.path
               );
-              await FileSystemUtils.writeFile(commandFile, cmd.fileContent);
+              await this.writeArtifactWithPreservation(projectPath, commandFile, cmd.fileContent);
             }
           }
         }
